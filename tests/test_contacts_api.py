@@ -144,3 +144,44 @@ def test_delete_contact(client, payload):
 def test_root_lists_entrypoints(client):
     body = client.get("/").json()
     assert body["contacts"] == BASE
+
+
+def test_contact_photo_create_and_retrieve(client, payload):
+    sample_base64_photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    response = client.post(BASE, json={**payload, "photo": sample_base64_photo})
+    assert response.status_code == 201
+    created = response.json()
+    assert created["photo"] == sample_base64_photo
+
+    contact_id = created["id"]
+    get_response = client.get(f"{BASE}/{contact_id}")
+    assert get_response.status_code == 200
+    assert get_response.json()["photo"] == sample_base64_photo
+
+
+def test_contact_photo_put_and_patch(client, payload):
+    sample_photo = "data:image/png;base64,initialphoto"
+    updated_photo = "data:image/png;base64,updatedphoto"
+    contact_id = client.post(BASE, json={**payload, "photo": sample_photo}).json()["id"]
+
+    # Test PATCH update photo
+    patch_res = client.patch(f"{BASE}/{contact_id}", json={"photo": updated_photo})
+    assert patch_res.status_code == 200
+    assert patch_res.json()["photo"] == updated_photo
+
+    # Test PUT replacement with photo preserved
+    put_res = client.put(
+        f"{BASE}/{contact_id}",
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "photo": updated_photo},
+    )
+    assert put_res.status_code == 200
+    assert put_res.json()["photo"] == updated_photo
+
+    # Test PUT without photo clears photo to None
+    put_clear = client.put(
+        f"{BASE}/{contact_id}",
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com"},
+    )
+    assert put_clear.status_code == 200
+    assert put_clear.json()["photo"] is None
+
