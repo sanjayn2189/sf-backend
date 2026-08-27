@@ -160,8 +160,8 @@ def test_contact_photo_create_and_retrieve(client, payload):
 
 
 def test_contact_photo_put_and_patch(client, payload):
-    sample_photo = "data:image/png;base64,initialphoto"
-    updated_photo = "data:image/png;base64,updatedphoto"
+    sample_photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    updated_photo = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
     contact_id = client.post(BASE, json={**payload, "photo": sample_photo}).json()["id"]
 
     # Test PATCH update photo
@@ -184,4 +184,35 @@ def test_contact_photo_put_and_patch(client, payload):
     )
     assert put_clear.status_code == 200
     assert put_clear.json()["photo"] is None
+
+
+def test_contact_photo_rejects_malformed_data_urls(client, payload):
+    # Missing data: prefix
+    assert client.post(BASE, json={**payload, "photo": "image/png;base64,abc="}).status_code == 422
+
+    # Unsupported MIME type
+    assert client.post(
+        BASE,
+        json={**payload, "photo": "data:application/pdf;base64,JVBERi0xLg=="},
+    ).status_code == 422
+
+    # Malformed base64
+    assert client.post(
+        BASE,
+        json={**payload, "photo": "data:image/png;base64,not_valid_base64!!!"},
+    ).status_code == 422
+
+
+def test_contact_photo_rejects_malformed_on_patch_and_put(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # PATCH invalid
+    assert client.patch(f"{BASE}/{contact_id}", json={"photo": "invalid-url"}).status_code == 422
+
+    # PUT invalid
+    assert client.put(
+        f"{BASE}/{contact_id}",
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "photo": "invalid-url"},
+    ).status_code == 422
+
 
