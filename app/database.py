@@ -157,7 +157,7 @@ def run_migrations(bind=None) -> None:
     migration_002 = "002_create_addresses_table_and_migrate_data"
     if not is_migration_applied(migration_002):
         if "contacts" in existing_tables:
-            # Step A: Ensure addresses table exists in a separate transaction
+            # Step A: Ensure addresses table exists in a separate DDL transaction
             if "addresses" not in existing_tables:
                 try:
                     with target_engine.begin() as ddl_conn:
@@ -198,59 +198,86 @@ def run_migrations(bind=None) -> None:
                         )
                         raise exc from None
 
-            # Step B: Perform data migration and version recording inside a clean transaction
+            # Step B: Transactionally claim migration version BEFORE copying data
             with target_engine.begin() as conn:
-                # Reflect contacts table to safely build dialect-agnostic Core expressions
-                contacts_table = Table("contacts", MetaData(), autoload_with=conn)
-                addresses_table = models.Address.__table__
-                col_names = set(contacts_table.columns.keys())
-                legacy_address_fields = {"address", "city", "state", "postal_code"}
+                claim_result = conn.execute(
+                    text(insert_version_sql),
+                    {"version": migration_002},
+                )
+                # If rowcount > 0, this transaction claimed the migration and performs the copy
+                if claim_result.rowcount > 0:
+                    contacts_table = Table("contacts", MetaData(), autoload_with=conn)
+                    addresses_table = models.Address.__table__
+                    col_names = set(contacts_table.columns.keys())
+                    legacy_address_fields = {"address", "city", "state", "postal_code"}
 
-                if legacy_address_fields.intersection(col_names):
-                    street_col = contacts_table.c.address if "address" in col_names else literal(None)
-                    city_col = contacts_table.c.city if "city" in col_names else literal(None)
-                    state_col = contacts_table.c.state if "state" in col_names else literal(None)
-                    zip_col = contacts_table.c.postal_code if "postal_code" in col_names else literal(None)
+                    if legacy_address_fields.intersection(col_names):
+                        street_col = (
+                            contacts_table.c.address
+                            if "address" in col_names
+                            else literal(None)
+                        )
+                        city_col = (
+                            contacts_table.c.city
+                            if "city" in col_names
+                            else literal(None)
+                        )
+                        state_col = (
+                            contacts_table.c.state
+                            if "state" in col_names
+                            else literal(None)
+                        )
+                        zip_col = (
+                            contacts_table.c.postal_code
+                            if "postal_code" in col_names
+                            else literal(None)
+                        )
 
-                    where_conditions = [
-                        and_(contacts_table.c[field].is_not(None), func.trim(contacts_table.c[field]) != "")
-                        for field in ("address", "city", "state", "postal_code")
-                        if field in col_names
-                    ]
-
-                    if where_conditions:
-                        not_already_migrated = ~select(1).where(
-                            addresses_table.c.contact_id == contacts_table.c.id
-                        ).exists()
-
-                        select_stmt = select(
-                            contacts_table.c.id.label("contact_id"),
-                            literal(models.AddressType.HOME.value).label("type"),
-                            street_col.label("street"),
-                            city_col.label("city"),
-                            state_col.label("state"),
-                            zip_col.label("zip"),
-                        ).where(
+                        where_conditions = [
                             and_(
-                                or_(*where_conditions),
-                                not_already_migrated,
+                                contacts_table.c[field].is_not(None),
+                                func.trim(contacts_table.c[field]) != "",
                             )
-                        )
+                            for field in ("address", "city", "state", "postal_code")
+                            if field in col_names
+                        ]
 
-                        insert_stmt = addresses_table.insert().from_select(
-                            [
-                                addresses_table.c.contact_id,
-                                addresses_table.c.type,
-                                addresses_table.c.street,
-                                addresses_table.c.city,
-                                addresses_table.c.state,
-                                addresses_table.c.zip,
-                            ],
-                            select_stmt,
-                        )
-                        conn.execute(insert_stmt)
+                        if where_conditions:
+                            not_already_migrated = ~select(1).where(
+                                addresses_table.c.contact_id == contacts_table.c.id
+                            ).exists()
 
-                conn.execute(text(insert_version_sql), {"version": migration_002})
+                            select_stmt = select(
+                                contacts_table.c.id.label("contact_id"),
+                                literal(models.AddressType.HOME.value).label("type"),
+                                street_col.label("street"),
+                                city_col.label("city"),
+                                state_col.label("state"),
+                                zip_col.label("zip"),
+                            ).where(
+                                and_(
+                                    or_(*where_conditions),
+                                    not_already_migrated,
+                                )
+                            )
+
+                            insert_stmt = addresses_table.insert().from_select(
+                                [
+                                    addresses_table.c.contact_id,
+                                    addresses_table.c.type,
+                                    addresses_table.c.street,
+                                    addresses_table.c.city,
+                                    addresses_table.c.state,
+                                    addresses_table.c.zip,
+                                ],
+                                select_stmt,
+                            )
+                            conn.execute(insert_stmt)
+                else:
+                    logger.debug(
+                        "Migration %s was claimed concurrently by another worker; skipping redundant copy.",
+                        migration_002,
+                    )
         else:
             logger.warning(
                 "Prerequisite table 'contacts' missing; skipping migration %s without marking as applied.",
