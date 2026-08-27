@@ -4,7 +4,10 @@ from sqlite3 import Connection as SQLite3Connection
 import threading
 
 from sqlalchemy import (
+    Column,
+    DateTime,
     MetaData,
+    String,
     Table,
     and_,
     create_engine,
@@ -69,18 +72,14 @@ def run_migrations(bind=None) -> None:
 
     target_engine = bind if bind is not None else engine
 
-    # 0. Ensure schema_migrations version table exists
-    with target_engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version VARCHAR(100) PRIMARY KEY,
-                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-        )
+    # 0. Ensure schema_migrations version table exists using dialect-agnostic Core Table
+    schema_migrations_table = Table(
+        "schema_migrations",
+        MetaData(),
+        Column("version", String(100), primary_key=True),
+        Column("applied_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
+    )
+    schema_migrations_table.create(bind=target_engine, checkfirst=True)
 
     def is_migration_applied(version: str) -> bool:
         with target_engine.connect() as conn:
