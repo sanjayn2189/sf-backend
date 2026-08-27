@@ -128,6 +128,42 @@ def test_patch_same_email_is_allowed(client, payload):
     assert response.status_code == 200
 
 
+def test_patch_explicit_null_addresses_clears_addresses(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # Explicit null clears addresses
+    res_null = client.patch(f"{BASE}/{contact_id}", json={"addresses": None})
+    assert res_null.status_code == 200
+    assert res_null.json()["addresses"] == []
+
+    # Update back to 1 address
+    res_add = client.patch(
+        f"{BASE}/{contact_id}",
+        json={"addresses": [{"type": "Work", "street": "500 Howard St", "city": "SF", "state": "CA", "zip": "94105"}]},
+    )
+    assert res_add.status_code == 200
+    assert len(res_add.json()["addresses"]) == 1
+
+    # Explicit empty list clears addresses
+    res_empty = client.patch(f"{BASE}/{contact_id}", json={"addresses": []})
+    assert res_empty.status_code == 200
+    assert res_empty.json()["addresses"] == []
+
+    # Omitted addresses in PATCH preserves existing addresses
+    res_add2 = client.patch(
+        f"{BASE}/{contact_id}",
+        json={"addresses": [{"type": "Home", "street": "100 Pine St", "city": "SF", "state": "CA", "zip": "94111"}]},
+    )
+    assert len(res_add2.json()["addresses"]) == 1
+
+    res_omit = client.patch(f"{BASE}/{contact_id}", json={"phone": "+1-999-999-9999"})
+    assert res_omit.status_code == 200
+    assert res_omit.json()["phone"] == "+1-999-999-9999"
+    assert len(res_omit.json()["addresses"]) == 1
+    assert res_omit.json()["addresses"][0]["street"] == "100 Pine St"
+
+
+
 def test_put_replaces_contact(client, payload):
     contact_id = client.post(BASE, json=payload).json()["id"]
     response = client.put(

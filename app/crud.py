@@ -62,7 +62,7 @@ def list_contacts(
 def create_contact(db: Session, payload: ContactCreate) -> Contact:
     data = payload.model_dump()
     data["email"] = _normalize_email(data["email"])
-    addresses_data = data.pop("addresses", [])
+    addresses_data = data.pop("addresses", []) or []
     contact = Contact(**data)
     for addr_data in addresses_data:
         contact.addresses.append(Address(**addr_data))
@@ -74,7 +74,7 @@ def create_contact(db: Session, payload: ContactCreate) -> Contact:
 
 def replace_contact(db: Session, contact: Contact, payload: ContactReplace) -> Contact:
     data = payload.model_dump()
-    addresses_data = data.pop("addresses", [])
+    addresses_data = data.pop("addresses", []) or []
     for field, value in data.items():
         setattr(contact, field, _normalize_email(value) if field == "email" else value)
     contact.addresses.clear()
@@ -87,13 +87,15 @@ def replace_contact(db: Session, contact: Contact, payload: ContactReplace) -> C
 
 def update_contact(db: Session, contact: Contact, payload: ContactUpdate) -> Contact:
     data = payload.model_dump(exclude_unset=True)
+    has_addresses = "addresses" in data
     addresses_data = data.pop("addresses", None)
     for field, value in data.items():
         setattr(contact, field, _normalize_email(value) if field == "email" else value)
-    if addresses_data is not None:
+    if has_addresses:
         contact.addresses.clear()
-        for addr_data in addresses_data:
-            contact.addresses.append(Address(**addr_data))
+        if addresses_data:
+            for addr_data in addresses_data:
+                contact.addresses.append(Address(**addr_data))
     db.commit()
     db.refresh(contact)
     return contact

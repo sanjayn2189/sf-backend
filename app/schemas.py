@@ -219,7 +219,10 @@ class ContactUpdate(BaseModel):
     job_title: str | None = Field(default=None, max_length=200, description="New job title.")
     notes: str | None = Field(default=None, description="New notes; replaces the existing text.")
     photo: str | None = Field(default=None, max_length=MAX_PHOTO_LENGTH, description="New photo as a base64 data URL.")
-    addresses: list[AddressCreate] | None = Field(default=None, description="New list of addresses.")
+    addresses: list[AddressCreate] | None = Field(
+        default=None,
+        description="New list of addresses. Pass null or [] to clear all addresses; omit to keep existing.",
+    )
 
     @field_validator("photo")
     @classmethod
