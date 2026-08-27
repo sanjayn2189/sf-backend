@@ -119,30 +119,33 @@ def run_migrations(bind=None) -> None:
     if not is_migration_applied(migration_001):
         if "contacts" in existing_tables:
             columns = {col["name"] for col in inspector.get_columns("contacts")}
-            with target_engine.begin() as conn:
-                if "photo" not in columns:
-                    try:
+            if "photo" not in columns:
+                try:
+                    with target_engine.begin() as ddl_conn:
                         if target_engine.dialect.name == "postgresql":
-                            conn.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS photo TEXT"))
+                            ddl_conn.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS photo TEXT"))
                         else:
-                            conn.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
-                    except (OperationalError, ProgrammingError) as exc:
-                        col_added = False
-                        try:
-                            inspector_conn = inspect(conn)
+                            ddl_conn.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
+                except (OperationalError, ProgrammingError) as exc:
+                    col_added = False
+                    try:
+                        with target_engine.connect() as probe_conn:
+                            inspector_probe = inspect(probe_conn)
                             columns_after = {
                                 col["name"]
-                                for col in inspector_conn.get_columns("contacts")
+                                for col in inspector_probe.get_columns("contacts")
                             }
                             col_added = "photo" in columns_after
-                        except Exception:
-                            col_added = False
+                    except Exception:
+                        col_added = False
 
-                        if col_added:
-                            logger.debug("Column 'photo' was added concurrently by another process.")
-                        else:
-                            logger.error("Failed to add column 'photo' during migration: %s", exc)
-                            raise exc from None
+                    if col_added:
+                        logger.debug("Column 'photo' was added concurrently by another process.")
+                    else:
+                        logger.error("Failed to add column 'photo' during migration: %s", exc)
+                        raise exc from None
+
+            with target_engine.begin() as conn:
                 conn.execute(text(insert_version_sql), {"version": migration_001})
         else:
             logger.warning(
@@ -154,18 +157,22 @@ def run_migrations(bind=None) -> None:
     migration_002 = "002_create_addresses_table_and_migrate_data"
     if not is_migration_applied(migration_002):
         if "contacts" in existing_tables:
-            with target_engine.begin() as conn:
-                if "addresses" not in existing_tables:
+            # Step A: Ensure addresses table exists in a separate transaction
+            if "addresses" not in existing_tables:
+                try:
+                    with target_engine.begin() as ddl_conn:
+                        models.Address.__table__.create(bind=ddl_conn, checkfirst=True)
+                    existing_tables.add("addresses")
+                except (OperationalError, ProgrammingError) as exc:
+                    # Failed DDL transaction was rolled back; verify using fresh connection/inspector
+                    addr_valid = False
                     try:
-                        models.Address.__table__.create(bind=conn, checkfirst=True)
-                    except (OperationalError, ProgrammingError) as exc:
-                        addr_valid = False
-                        try:
-                            inspector_conn = inspect(conn)
-                            if "addresses" in inspector_conn.get_table_names():
+                        with target_engine.connect() as probe_conn:
+                            inspector_probe = inspect(probe_conn)
+                            if "addresses" in inspector_probe.get_table_names():
                                 addr_cols = {
                                     col["name"]
-                                    for col in inspector_conn.get_columns("addresses")
+                                    for col in inspector_probe.get_columns("addresses")
                                 }
                                 expected_cols = {
                                     "id",
@@ -177,20 +184,22 @@ def run_migrations(bind=None) -> None:
                                     "zip",
                                 }
                                 addr_valid = expected_cols.issubset(addr_cols)
-                        except Exception:
-                            addr_valid = False
+                    except Exception:
+                        addr_valid = False
 
-                        if addr_valid:
-                            logger.debug(
-                                "Table 'addresses' with expected schema was created concurrently by another process."
-                            )
-                        else:
-                            logger.error(
-                                "Failed to create 'addresses' table during migration: %s", exc
-                            )
-                            raise exc from None
-                    existing_tables.add("addresses")
+                    if addr_valid:
+                        logger.debug(
+                            "Table 'addresses' with expected schema was created concurrently by another process."
+                        )
+                        existing_tables.add("addresses")
+                    else:
+                        logger.error(
+                            "Failed to create 'addresses' table during migration: %s", exc
+                        )
+                        raise exc from None
 
+            # Step B: Perform data migration and version recording inside a clean transaction
+            with target_engine.begin() as conn:
                 # Reflect contacts table to safely build dialect-agnostic Core expressions
                 contacts_table = Table("contacts", MetaData(), autoload_with=conn)
                 addresses_table = models.Address.__table__
