@@ -1,3 +1,7 @@
+from sqlalchemy import func, select
+
+from app.database import SessionLocal, engine
+
 BASE = "/api/v1/contacts"
 
 
@@ -17,6 +21,14 @@ def test_create_contact(client, payload):
     assert body["email"] == "ada@example.com"
     assert body["full_name"] == "Ada Lovelace"
     assert body["created_at"] and body["updated_at"]
+    assert len(body["addresses"]) == 1
+    addr = body["addresses"][0]
+    assert addr["type"] == "Home"
+    assert addr["street"] == "1 Market St, Suite 400"
+    assert addr["city"] == "San Francisco"
+    assert addr["state"] == "CA"
+    assert addr["zip"] == "94105"
+    assert addr["contact_id"] == body["id"]
 
 
 def test_create_requires_valid_email(client, payload):
@@ -40,6 +52,7 @@ def test_get_contact(client, payload):
     response = client.get(f"{BASE}/{contact_id}")
     assert response.status_code == 200
     assert response.json()["id"] == contact_id
+    assert len(response.json()["addresses"]) == 1
 
 
 def test_get_missing_contact_returns_404(client):
@@ -99,6 +112,7 @@ def test_patch_updates_only_sent_fields(client, payload):
     assert body["phone"] == "+1-000-000-0000"
     assert body["first_name"] == "Ada"
     assert body["company"] == "Analytical Engines"
+    assert len(body["addresses"]) == 1
 
 
 def test_patch_duplicate_email_conflicts(client, payload):
@@ -114,31 +128,89 @@ def test_patch_same_email_is_allowed(client, payload):
     assert response.status_code == 200
 
 
+def test_patch_explicit_null_addresses_clears_addresses(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # Explicit null clears addresses
+    res_null = client.patch(f"{BASE}/{contact_id}", json={"addresses": None})
+    assert res_null.status_code == 200
+    assert res_null.json()["addresses"] == []
+
+    # Update back to 1 address
+    res_add = client.patch(
+        f"{BASE}/{contact_id}",
+        json={"addresses": [{"type": "Work", "street": "500 Howard St", "city": "SF", "state": "CA", "zip": "94105"}]},
+    )
+    assert res_add.status_code == 200
+    assert len(res_add.json()["addresses"]) == 1
+
+    # Explicit empty list clears addresses
+    res_empty = client.patch(f"{BASE}/{contact_id}", json={"addresses": []})
+    assert res_empty.status_code == 200
+    assert res_empty.json()["addresses"] == []
+
+    # Omitted addresses in PATCH preserves existing addresses
+    res_add2 = client.patch(
+        f"{BASE}/{contact_id}",
+        json={"addresses": [{"type": "Home", "street": "100 Pine St", "city": "SF", "state": "CA", "zip": "94111"}]},
+    )
+    assert len(res_add2.json()["addresses"]) == 1
+
+    res_omit = client.patch(f"{BASE}/{contact_id}", json={"phone": "+1-999-999-9999"})
+    assert res_omit.status_code == 200
+    assert res_omit.json()["phone"] == "+1-999-999-9999"
+    assert len(res_omit.json()["addresses"]) == 1
+    assert res_omit.json()["addresses"][0]["street"] == "100 Pine St"
+
+
+
 def test_put_replaces_contact(client, payload):
     contact_id = client.post(BASE, json=payload).json()["id"]
     response = client.put(
         f"{BASE}/{contact_id}",
-        json={"first_name": "Grace", "last_name": "Hopper", "email": "grace@example.com"},
+        json={"first_name": "Grace", "last_name": "Hopper", "email": "grace@example.com", "addresses": []},
     )
     assert response.status_code == 200
     body = response.json()
     assert body["full_name"] == "Grace Hopper"
     assert body["company"] is None  # omitted fields are cleared by PUT
+    assert body["addresses"] == []  # omitted addresses cleared on PUT replacement
+
+
+def test_put_requires_addresses(client, payload):
+    contact_id = client.post(BASE, json=payload).json()["id"]
+    response = client.put(
+        f"{BASE}/{contact_id}",
+        json={"first_name": "Grace", "last_name": "Hopper", "email": "grace@example.com"},
+    )
+    assert response.status_code == 422
 
 
 def test_put_missing_contact_returns_404(client):
     response = client.put(
         f"{BASE}/9999",
-        json={"first_name": "A", "last_name": "B", "email": "ab@example.com"},
+        json={"first_name": "A", "last_name": "B", "email": "ab@example.com", "addresses": []},
     )
     assert response.status_code == 404
 
 
-def test_delete_contact(client, payload):
+def test_delete_contact_cascades_addresses(client, payload):
+    from app.models import Address
+
     contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # Verify address exists in DB
+    with SessionLocal() as db:
+        addr_count = db.execute(select(func.count()).select_from(Address).where(Address.contact_id == contact_id)).scalar_one()
+        assert addr_count == 1
+
     assert client.delete(f"{BASE}/{contact_id}").status_code == 204
     assert client.get(f"{BASE}/{contact_id}").status_code == 404
-    assert client.delete(f"{BASE}/{contact_id}").status_code == 404
+
+    # Verify address was cascade deleted
+    with SessionLocal() as db:
+        addr_count_after = db.execute(select(func.count()).select_from(Address).where(Address.contact_id == contact_id)).scalar_one()
+        assert addr_count_after == 0
 
 
 def test_root_lists_entrypoints(client):
@@ -172,7 +244,7 @@ def test_contact_photo_put_and_patch(client, payload):
     # Test PUT replacement with photo preserved
     put_res = client.put(
         f"{BASE}/{contact_id}",
-        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "photo": updated_photo},
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "photo": updated_photo, "addresses": []},
     )
     assert put_res.status_code == 200
     assert put_res.json()["photo"] == updated_photo
@@ -180,10 +252,11 @@ def test_contact_photo_put_and_patch(client, payload):
     # Test PUT without photo clears photo to None
     put_clear = client.put(
         f"{BASE}/{contact_id}",
-        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com"},
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "addresses": []},
     )
     assert put_clear.status_code == 200
     assert put_clear.json()["photo"] is None
+
 
 
 def test_contact_photo_rejects_malformed_data_urls(client, payload):
@@ -215,4 +288,99 @@ def test_contact_photo_rejects_malformed_on_patch_and_put(client, payload):
         json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "photo": "invalid-url"},
     ).status_code == 422
 
+
+def test_multiple_typed_addresses_crud(client, payload):
+    addresses = [
+        {
+            "type": "Home",
+            "street": "123 Main St",
+            "city": "San Francisco",
+            "state": "CA",
+            "zip": "94105",
+        },
+        {
+            "type": "Work",
+            "street": "500 Howard St",
+            "city": "San Francisco",
+            "state": "CA",
+            "zip": "94105",
+        },
+        {
+            "type": "Other",
+            "street": "P.O. Box 777",
+            "city": "Oakland",
+            "state": "CA",
+            "zip": "94601",
+        },
+    ]
+    res = client.post(BASE, json={**payload, "addresses": addresses})
+    assert res.status_code == 201
+    created = res.json()
+    assert len(created["addresses"]) == 3
+    types = [a["type"] for a in created["addresses"]]
+    assert types == ["Home", "Work", "Other"]
+
+    contact_id = created["id"]
+
+    # Replace via PUT with a single address
+    put_addresses = [
+        {
+            "type": "Work",
+            "street": "100 California St",
+            "city": "San Francisco",
+            "state": "CA",
+            "zip": "94111",
+        }
+    ]
+    put_res = client.put(
+        f"{BASE}/{contact_id}",
+        json={"first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com", "addresses": put_addresses},
+    )
+    assert put_res.status_code == 200
+    assert len(put_res.json()["addresses"]) == 1
+    assert put_res.json()["addresses"][0]["street"] == "100 California St"
+
+    # Reject invalid address type
+    invalid_res = client.post(
+        BASE,
+        json={**payload, "email": "unique@example.com", "addresses": [{"type": "InvalidType", "street": "Test"}]},
+    )
+    assert invalid_res.status_code == 422
+
+
+def test_sqlite_foreign_keys_and_cascade_on_raw_delete(client, payload):
+    from sqlalchemy import text
+    from app.models import Address
+
+    contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # Verify foreign_keys pragma is enabled on the SQLite connection
+    with engine.connect() as conn:
+        fk_status = conn.execute(text("PRAGMA foreign_keys")).scalar()
+        assert fk_status == 1
+
+        # Direct SQL delete on contacts table triggers DB-level ON DELETE CASCADE
+        conn.execute(text("DELETE FROM contacts WHERE id = :id"), {"id": contact_id})
+        conn.commit()
+
+        # Check that Address was cascade deleted by SQLite foreign key constraint
+        addr_count = conn.execute(
+            select(func.count()).select_from(Address).where(Address.contact_id == contact_id)
+        ).scalar_one()
+        assert addr_count == 0
+
+
+def test_db_level_address_type_constraint(client, payload):
+    import pytest
+    from sqlalchemy.exc import IntegrityError, StatementError
+    from app.models import Address
+
+    contact_id = client.post(BASE, json=payload).json()["id"]
+
+    # Direct DB write with an invalid type string violates CHECK constraint / Enum
+    with pytest.raises((IntegrityError, StatementError)):
+        with SessionLocal() as db:
+            invalid_addr = Address(contact_id=contact_id, type="InvalidType", street="123 Test")
+            db.add(invalid_addr)
+            db.commit()
 

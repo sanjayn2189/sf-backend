@@ -1,6 +1,6 @@
 from app.crud import count_contacts, create_contact
 from app.database import SessionLocal
-from app.schemas import ContactCreate
+from app.schemas import AddressCreate, AddressType, ContactCreate
 
 SAMPLE_CONTACTS = [
     ContactCreate(
@@ -10,10 +10,23 @@ SAMPLE_CONTACTS = [
         phone="+1-415-555-0101",
         company="Analytical Engines",
         job_title="Mathematician",
-        city="San Francisco",
-        state="CA",
-        country="USA",
         notes="First programmer.",
+        addresses=[
+            AddressCreate(
+                type=AddressType.WORK,
+                street="1 Market St, Suite 400",
+                city="San Francisco",
+                state="CA",
+                zip="94105",
+            ),
+            AddressCreate(
+                type=AddressType.HOME,
+                street="10 Ockham Park",
+                city="Surrey",
+                state="England",
+                zip="GU23 6NP",
+            ),
+        ],
     ),
     ContactCreate(
         first_name="Grace",
@@ -22,9 +35,15 @@ SAMPLE_CONTACTS = [
         phone="+1-415-555-0102",
         company="US Navy",
         job_title="Rear Admiral",
-        city="Arlington",
-        state="VA",
-        country="USA",
+        addresses=[
+            AddressCreate(
+                type=AddressType.WORK,
+                street="Pentagon, Room 3E",
+                city="Arlington",
+                state="VA",
+                zip="20301",
+            )
+        ],
     ),
     ContactCreate(
         first_name="Alan",
@@ -33,8 +52,15 @@ SAMPLE_CONTACTS = [
         phone="+44-20-5555-0103",
         company="Bletchley Park",
         job_title="Cryptanalyst",
-        city="London",
-        country="UK",
+        addresses=[
+            AddressCreate(
+                type=AddressType.OTHER,
+                street="Hut 8, Bletchley Park",
+                city="Milton Keynes",
+                state="Buckinghamshire",
+                zip="MK3 6EB",
+            )
+        ],
     ),
 ]
 
