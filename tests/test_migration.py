@@ -1,9 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import inspect, text
-from sqlalchemy.orm import Session
 
 from app.crud import get_contact
-from app.database import Base, engine, init_db, run_migrations
+from app.database import Base, SessionLocal, engine, init_db, run_migrations
 
 
 def _setup_legacy_schema():
@@ -20,11 +19,6 @@ def _setup_legacy_schema():
                     phone VARCHAR(40),
                     company VARCHAR(200),
                     job_title VARCHAR(200),
-                    address VARCHAR(300),
-                    city VARCHAR(120),
-                    state VARCHAR(120),
-                    postal_code VARCHAR(20),
-                    country VARCHAR(120),
                     notes TEXT,
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -43,28 +37,31 @@ def _setup_legacy_schema():
         conn.commit()
 
 
-def test_schema_upgrade_adds_photo_column():
+def test_schema_upgrade_adds_photo_column_and_addresses_table():
     _setup_legacy_schema()
 
-    # Verify column does NOT exist before migration
+    # Verify column and table do NOT exist before migration
     inspector = inspect(engine)
     columns_before = [col["name"] for col in inspector.get_columns("contacts")]
     assert "photo" not in columns_before
+    assert "addresses" not in inspector.get_table_names()
 
-    # Run migration
+    # Run run_migrations directly (simulating deployments that call run_migrations)
     run_migrations(bind=engine)
 
-    # Verify column exists after migration
+    # Verify column and table exist after migration
     inspector_after = inspect(engine)
     columns_after = [col["name"] for col in inspector_after.get_columns("contacts")]
     assert "photo" in columns_after
+    assert "addresses" in inspector_after.get_table_names()
 
     # Verify ORM can load the existing contact and photo is None
-    with Session(engine) as db:
+    with SessionLocal() as db:
         contact = get_contact(db, 1)
         assert contact is not None
         assert contact.email == "ada@example.com"
         assert contact.photo is None
+        assert contact.addresses == []
 
         # Verify we can update photo on existing record with valid base64 data URL
         valid_photo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -77,7 +74,7 @@ def test_schema_upgrade_adds_photo_column():
 def test_concurrent_migrations_do_not_fail():
     _setup_legacy_schema()
 
-    # Run init_db / run_migrations across 10 concurrent worker threads simultaneously
+    # Run init_db across 10 concurrent worker threads simultaneously
     def run_worker():
         init_db(bind=engine)
 
@@ -89,3 +86,4 @@ def test_concurrent_migrations_do_not_fail():
     inspector = inspect(engine)
     columns = [col["name"] for col in inspector.get_columns("contacts")]
     assert "photo" in columns
+    assert "addresses" in inspector.get_table_names()
