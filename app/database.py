@@ -1,7 +1,8 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -45,11 +46,36 @@ def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     cursor.close()
 
 
-def init_db() -> None:
-    """Create tables. Called on startup; safe to call repeatedly."""
+def run_migrations(bind=None) -> None:
+    """Apply schema migrations to existing databases safely and idempotently."""
+    target_engine = bind if bind is not None else engine
+    inspector = inspect(target_engine)
+    if "contacts" in inspector.get_table_names():
+        columns = [col["name"] for col in inspector.get_columns("contacts")]
+        if "photo" not in columns:
+            try:
+                with target_engine.connect() as conn:
+                    if target_engine.dialect.name == "postgresql":
+                        conn.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS photo TEXT"))
+                    else:
+                        conn.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
+                    conn.commit()
+            except (OperationalError, ProgrammingError) as exc:
+                err_msg = str(exc).lower()
+                if "duplicate column" in err_msg or "already exists" in err_msg:
+                    # Another concurrent worker already added the column
+                    pass
+                else:
+                    raise
+
+
+def init_db(bind=None) -> None:
+    """Create tables and apply migrations. Called on startup; safe to call repeatedly."""
     from app import models  # noqa: F401  (register models on Base.metadata)
 
-    Base.metadata.create_all(bind=engine)
+    target_engine = bind if bind is not None else engine
+    Base.metadata.create_all(bind=target_engine)
+    run_migrations(bind=target_engine)
 
 
 def get_db() -> Generator[Session, None, None]:
