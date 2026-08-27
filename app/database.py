@@ -79,7 +79,23 @@ def run_migrations(bind=None) -> None:
         Column("version", String(100), primary_key=True),
         Column("applied_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
     )
-    schema_migrations_table.create(bind=target_engine, checkfirst=True)
+    try:
+        schema_migrations_table.create(bind=target_engine, checkfirst=True)
+    except (OperationalError, ProgrammingError) as exc:
+        # Multi-process concurrency: verify schema_migrations table existence safely without masking original error
+        table_created = False
+        try:
+            with target_engine.connect() as probe_conn:
+                probe_conn.execute(text("SELECT 1 FROM schema_migrations LIMIT 1"))
+            table_created = True
+        except Exception:
+            table_created = False
+
+        if table_created:
+            logger.debug("Table 'schema_migrations' was created concurrently by another process.")
+        else:
+            logger.error("Failed to create 'schema_migrations' table during migration: %s", exc)
+            raise exc from None
 
     def is_migration_applied(version: str) -> bool:
         with target_engine.connect() as conn:
@@ -105,10 +121,28 @@ def run_migrations(bind=None) -> None:
             columns = {col["name"] for col in inspector.get_columns("contacts")}
             with target_engine.begin() as conn:
                 if "photo" not in columns:
-                    if target_engine.dialect.name == "postgresql":
-                        conn.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS photo TEXT"))
-                    else:
-                        conn.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
+                    try:
+                        if target_engine.dialect.name == "postgresql":
+                            conn.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS photo TEXT"))
+                        else:
+                            conn.execute(text("ALTER TABLE contacts ADD COLUMN photo TEXT"))
+                    except (OperationalError, ProgrammingError) as exc:
+                        col_added = False
+                        try:
+                            inspector_conn = inspect(conn)
+                            columns_after = {
+                                col["name"]
+                                for col in inspector_conn.get_columns("contacts")
+                            }
+                            col_added = "photo" in columns_after
+                        except Exception:
+                            col_added = False
+
+                        if col_added:
+                            logger.debug("Column 'photo' was added concurrently by another process.")
+                        else:
+                            logger.error("Failed to add column 'photo' during migration: %s", exc)
+                            raise exc from None
                 conn.execute(text(insert_version_sql), {"version": migration_001})
         else:
             logger.warning(
@@ -122,7 +156,39 @@ def run_migrations(bind=None) -> None:
         if "contacts" in existing_tables:
             with target_engine.begin() as conn:
                 if "addresses" not in existing_tables:
-                    models.Address.__table__.create(bind=conn, checkfirst=True)
+                    try:
+                        models.Address.__table__.create(bind=conn, checkfirst=True)
+                    except (OperationalError, ProgrammingError) as exc:
+                        addr_valid = False
+                        try:
+                            inspector_conn = inspect(conn)
+                            if "addresses" in inspector_conn.get_table_names():
+                                addr_cols = {
+                                    col["name"]
+                                    for col in inspector_conn.get_columns("addresses")
+                                }
+                                expected_cols = {
+                                    "id",
+                                    "contact_id",
+                                    "type",
+                                    "street",
+                                    "city",
+                                    "state",
+                                    "zip",
+                                }
+                                addr_valid = expected_cols.issubset(addr_cols)
+                        except Exception:
+                            addr_valid = False
+
+                        if addr_valid:
+                            logger.debug(
+                                "Table 'addresses' with expected schema was created concurrently by another process."
+                            )
+                        else:
+                            logger.error(
+                                "Failed to create 'addresses' table during migration: %s", exc
+                            )
+                            raise exc from None
                     existing_tables.add("addresses")
 
                 # Reflect contacts table to safely build dialect-agnostic Core expressions
@@ -195,23 +261,26 @@ def init_db(bind=None) -> None:
         try:
             Base.metadata.create_all(bind=target_engine, checkfirst=True)
         except (OperationalError, ProgrammingError) as exc:
-            # Multi-process concurrency: verify all registered Base.metadata tables exist
-            inspector = inspect(target_engine)
-            existing_tables = set(inspector.get_table_names())
-            expected_tables = set(Base.metadata.tables.keys())
-            if expected_tables.issubset(existing_tables):
+            # Multi-process concurrency: verify all registered Base.metadata tables exist safely
+            all_exist = False
+            try:
+                inspector = inspect(target_engine)
+                existing_tables = set(inspector.get_table_names())
+                expected_tables = set(Base.metadata.tables.keys())
+                all_exist = expected_tables.issubset(existing_tables)
+            except Exception:
+                all_exist = False
+
+            if all_exist:
                 logger.debug(
-                    "All required tables %s were created concurrently by another process.",
-                    expected_tables,
+                    "All required tables were created concurrently by another process.",
                 )
             else:
-                missing = expected_tables - existing_tables
                 logger.error(
-                    "Failed to create tables during startup. Missing required tables: %s. Error: %s",
-                    missing,
+                    "Failed to create tables during startup: %s",
                     exc,
                 )
-                raise
+                raise exc from None
         run_migrations(bind=target_engine)
 
 
